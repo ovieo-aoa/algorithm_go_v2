@@ -32,37 +32,103 @@ function getWinResult(b) {
   return null;
 }
 
-const PYTHON_HELPERS = `
-WIN_LINES = [
-    (0, 1, 2), (3, 4, 5), (6, 7, 8),
-    (0, 3, 6), (1, 4, 7), (2, 5, 8),
-    (0, 4, 8), (2, 4, 6)
+// 1-based (boxes 1-9) imperative DSL prelude injected before each student run
+const PYTHON_DSL_PRELUDE = `
+_WIN_LINES_1 = [
+    (1, 2, 3), (4, 5, 6), (7, 8, 9),
+    (1, 4, 7), (2, 5, 8), (3, 6, 9),
+    (1, 5, 9), (3, 5, 7)
 ]
 
-def get_available_moves(board):
-    """Returns a list of indices (0-8) that are currently empty."""
-    return [i for i, cell in enumerate(board) if cell is None]
+_chosen_box = None
+_play_error = None
 
-def check_winner(board):
-    """Returns 'X', 'O', or None if there is no winner yet."""
-    for a, b, c in WIN_LINES:
-        if board[a] is not None and board[a] == board[b] == board[c]:
-            return board[a]
+def _check_winner_1(b1):
+    for a, c, d in _WIN_LINES_1:
+        if b1[a] is not None and b1[a] == b1[c] == b1[d]:
+            return b1[a]
     return None
 
-def is_board_full(board):
-    """Returns True if no empty squares remain."""
-    return None not in board
+def _valid_box(box):
+    return isinstance(box, int) and not isinstance(box, bool) and 1 <= box <= 9
 
-def get_opponent(player):
-    """Returns 'O' if player is 'X', or 'X' if player is 'O'."""
-    return 'O' if player == 'X' else 'X'
+def is_empty(box):
+    """Returns True if box (1-9) is empty."""
+    if not _valid_box(box):
+        raise ValueError(f"Box must be between 1 and 9 (got {box!r}).")
+    return board[box] is None
 
-def simulate_move(board, index, player):
-    """Returns a NEW copy of the board with player placed at index."""
-    new_board = list(board)
-    new_board[index] = player
-    return new_board
+def has_piece(box, who):
+    """Returns True if box (1-9) contains who ('X' or 'O')."""
+    if not _valid_box(box):
+        raise ValueError(f"Box must be between 1 and 9 (got {box!r}).")
+    return board[box] == who
+
+def empty_boxes():
+    """Returns a list of all empty box numbers (1-9)."""
+    return [i for i in range(1, 10) if board[i] is None]
+
+def winning_box(who):
+    """Returns a box (1-9) where 'who' can win on this move, or None."""
+    for i in range(1, 10):
+        if board[i] is None:
+            sim = list(board)
+            sim[i] = who
+            if _check_winner_1(sim) == who:
+                return i
+    return None
+
+def fork_box(who):
+    """Returns a box (1-9) that creates 2+ simultaneous winning threats for 'who', or None."""
+    for i in range(1, 10):
+        if board[i] is None:
+            sim = list(board)
+            sim[i] = who
+            if _check_winner_1(sim) == who:
+                continue
+            threats = 0
+            for j in range(1, 10):
+                if sim[j] is None:
+                    sim2 = list(sim)
+                    sim2[j] = who
+                    if _check_winner_1(sim2) == who:
+                        threats += 1
+            if threats >= 2:
+                return i
+    return None
+
+def play(box):
+    """Plays your piece in box (1-9). Only the FIRST valid play() command runs."""
+    global _chosen_box, _play_error
+    if _chosen_box is not None or _play_error is not None:
+        return
+    if not _valid_box(box):
+        _play_error = f"Illegal box number ({box!r}). Boxes are numbered 1 to 9."
+        return
+    if board[box] is not None:
+        _play_error = f"Box {box} is already taken by '{board[box]}'!"
+        return
+    _chosen_box = box
+
+def play_any(boxes):
+    """Plays in the first empty box from the given list, e.g. play_any([5, 1, 3, 7, 9])."""
+    global _chosen_box, _play_error
+    if _chosen_box is not None or _play_error is not None:
+        return
+    for box in boxes:
+        if not _valid_box(box):
+            _play_error = f"Illegal box number ({box!r}) inside play_any()."
+            return
+        if board[box] is None:
+            _chosen_box = box
+            return
+
+def play_random():
+    """Plays in a random empty box."""
+    import random as _rnd
+    avail = empty_boxes()
+    if avail:
+        play(_rnd.choice(avail))
 `;
 
 const WORKER_SCRIPT = `
@@ -81,7 +147,7 @@ const WORKER_SCRIPT = `
   }
 
   async function processMessage(e) {
-    const { mode, code, helpers, board, botMark } = e.data;
+    const { mode, code, prelude, board, botMark } = e.data;
 
     try {
       const py = await ensurePyodide();
@@ -91,7 +157,7 @@ const WORKER_SCRIPT = `
         return;
       }
 
-      py.globals.set("js_helpers", helpers);
+      py.globals.set("js_prelude", prelude);
       py.globals.set("js_user_code", code);
       py.globals.set("js_mode", mode);
       py.globals.set("js_board", board || []);
@@ -104,15 +170,15 @@ import json
 import time
 import random
 
-def _format_board(b):
-    def cell(v, i):
-        return f" {v} " if v is not None else f"[{i}]"
+def _format_board_1(b0):
+    def cell(v, idx1):
+        return f" {v} " if v is not None else f"[{idx1}]"
     rows = [
-        f"{cell(b[0], 0)}|{cell(b[1], 1)}|{cell(b[2], 2)}",
+        f"{cell(b0[0], 1)}|{cell(b0[1], 2)}|{cell(b0[2], 3)}",
         "---+---+---",
-        f"{cell(b[3], 3)}|{cell(b[4], 4)}|{cell(b[5], 5)}",
+        f"{cell(b0[3], 4)}|{cell(b0[4], 5)}|{cell(b0[5], 6)}",
         "---+---+---",
-        f"{cell(b[6], 6)}|{cell(b[7], 7)}|{cell(b[8], 8)}"
+        f"{cell(b0[6], 7)}|{cell(b0[7], 8)}|{cell(b0[8], 9)}"
     ]
     return "\\\\n".join(rows)
 
@@ -173,32 +239,44 @@ def _optimal_move(b, mark, opp_mark):
                 chosen = i
     return chosen
 
+def _execute_student_turn(b0, mark, compiled_code):
+    opp = "O" if mark == "X" else "X"
+    my_count = sum(1 for cell in b0 if cell == mark)
+    env = {
+        "me": mark,
+        "opponent": opp,
+        "starting_first": (mark == "X"),
+        "my_turn": my_count + 1,
+        "board": [None] + list(b0)  # 1-indexed: board[1..9]
+    }
+    exec(js_prelude, env)
+    exec(compiled_code, env)
+
+    if env.get("_play_error"):
+        return None, env["_play_error"]
+
+    chosen = env.get("_chosen_box")
+    if chosen is None:
+        return None, "No move played! Make sure one of your play(...) commands runs."
+
+    return chosen - 1, None  # Convert 1-based box back to 0-based index
+
 def _run():
-    env = {}
     try:
-        exec(js_helpers, env)
-        exec(js_user_code, env)
+        compiled = compile(js_user_code, "<bot_logic.py>", "exec")
     except Exception as exc:
         return json.dumps({
             "mode": "error",
             "passed": False,
-            "message": f"Syntax/Load error: {type(exc).__name__}: {exc}"
-        })
-
-    make_move = env.get("make_move")
-    if not callable(make_move):
-        return json.dumps({
-            "mode": "error",
-            "passed": False,
-            "message": "Function make_move(board, player) is not defined."
+            "message": f"Syntax error: {type(exc).__name__}: {exc}"
         })
 
     if js_mode == "single_move":
-        b = list(js_board.to_py())
+        b0 = list(js_board.to_py())
         old_stdout = sys.stdout
         sys.stdout = buf = io.StringIO()
         try:
-            move = make_move(list(b), js_bot_mark)
+            idx0, err = _execute_student_turn(b0, js_bot_mark, compiled)
         except Exception as exc:
             sys.stdout = old_stdout
             return json.dumps({
@@ -210,10 +288,17 @@ def _run():
         finally:
             sys.stdout = old_stdout
 
+        if err:
+            return json.dumps({
+                "mode": "error",
+                "passed": False,
+                "message": err,
+                "stdout": buf.getvalue()
+            })
+
         return json.dumps({
             "mode": "single_move",
-            "move": move if isinstance(move, int) and not isinstance(move, bool) else str(move),
-            "is_valid_int": isinstance(move, int) and not isinstance(move, bool),
+            "move": idx0,
             "stdout": buf.getvalue()
         })
 
@@ -236,35 +321,30 @@ def _run():
                 old_stdout = sys.stdout
                 sys.stdout = devnull
                 try:
-                    idx = make_move(list(b), user_mark)
+                    idx, err = _execute_student_turn(b, user_mark, compiled)
                 except Exception as exc:
                     sys.stdout = old_stdout
                     return json.dumps({
                         "mode": "verify",
                         "passed": False,
                         "message": f"Crash on Match #{match + 1}/{total_matches} (Playing as {user_mark}): {type(exc).__name__}: {exc}",
-                        "boardSnapshot": _format_board(b)
+                        "boardSnapshot": _format_board_1(b)
                     })
                 finally:
                     sys.stdout = old_stdout
+
+                if err:
+                    return json.dumps({
+                        "mode": "verify",
+                        "passed": False,
+                        "message": f"Failed on Match #{match + 1}/{total_matches} (Playing as {user_mark} vs. {opponent_label}): {err}",
+                        "boardSnapshot": _format_board_1(b)
+                    })
             elif use_optimal:
                 idx = _optimal_move(b, tester_mark, user_mark)
             else:
                 avail = [i for i, v in enumerate(b) if v is None]
                 idx = random.choice(avail)
-
-            if not isinstance(idx, int) or isinstance(idx, bool) or idx < 0 or idx > 8 or b[idx] is not None:
-                reason = (
-                    f"invalid value ({idx!r})"
-                    if not isinstance(idx, int) or isinstance(idx, bool) or idx < 0 or idx > 8
-                    else f"occupied square [{idx}]"
-                )
-                return json.dumps({
-                    "mode": "verify",
-                    "passed": False,
-                    "message": f"Failed on Match #{match + 1}/{total_matches} (Playing as {user_mark} vs. {opponent_label}): Illegal move — returned {reason}.",
-                    "boardSnapshot": _format_board(b)
-                })
 
             b[idx] = turn
             winner = _test_winner(b)
@@ -274,7 +354,7 @@ def _run():
                         "mode": "verify",
                         "passed": False,
                         "message": f"Failed on Match #{match + 1}/{total_matches} (Playing as {user_mark} vs. {opponent_label}): Bot was defeated.",
-                        "boardSnapshot": _format_board(b)
+                        "boardSnapshot": _format_board_1(b)
                     })
                 break
             if None not in b:
@@ -307,51 +387,53 @@ _run()
   };
 `;
 
-const STARTER_CODE = `# TASK: Write a Python bot that ALWAYS wins or draws Tic-Tac-Toe,
-# whether starting first ('X') or second ('O').
+const STARTER_CODE = `# BOXES ARE NUMBERED 1 TO 9:
+#   1 | 2 | 3
+#  ---+---+---
+#   4 | 5 | 6
+#  ---+---+---
+#   7 | 8 | 9
 #
-# AVAILABLE PREDEFINED FUNCTIONS:
-#   get_available_moves(board)        -> List of empty indices, e.g. [0, 4, 8]
-#   check_winner(board)               -> Returns 'X', 'O', or None
-#   is_board_full(board)              -> Returns True or False
-#   get_opponent(player)              -> Returns 'O' for 'X', or 'X' for 'O'
-#   simulate_move(board, idx, player) -> Returns a new board copy with move applied
+# BUILT-IN VARIABLES:
+#   me             -> Your symbol ('X' or 'O')
+#   opponent       -> Other player's symbol ('O' or 'X')
+#   my_turn        -> Which turn this is for you (1, 2, 3, 4, or 5)
+#   starting_first -> True if you are 'X', False if you are 'O'
 #
-# PARAMETERS:
-#   board  -> List of 9 items ('X', 'O', or None)
-#   player -> Your bot's symbol ('X' or 'O')
-#
-# RETURN: An integer from 0 to 8 for your chosen square.
+# BUILT-IN COMMANDS (first play command that runs locks in your move):
+#   play(box)              -> Play in box 1-9 (e.g. play(5))
+#   play_any([5, 1, 3])    -> Play in the first empty box from the list
+#   play_random()          -> Play in a random empty box
+#   is_empty(box)          -> True if box 1-9 is empty
+#   has_piece(box, who)    -> True if box 1-9 has 'X' or 'O'
+#   winning_box(who)       -> Box number where 'who' can win now, or None
+#   fork_box(who)          -> Box number that creates a 2-way trap, or None
 
-def make_move(board, player):
-    opponent = get_opponent(player)
-    moves = get_available_moves(board)
+# 1. Take a winning move right away if available
+if winning_box(me) is not None:
+    play(winning_box(me))
 
-    # 1. Check if we can win immediately on this move:
-    for move in moves:
-        test_board = simulate_move(board, move, player)
-        if check_winner(test_board) == player:
-            return move
+# 2. Block the opponent if they are about to win
+if winning_box(opponent) is not None:
+    play(winning_box(opponent))
 
-    # 2. Check if we need to block the opponent from winning:
-    for move in moves:
-        test_board = simulate_move(board, move, opponent)
-        if check_winner(test_board) == opponent:
-            return move
+# 3. Your turn-by-turn strategy:
+if my_turn == 1:
+    play_any([5, 1, 3, 7, 9])
 
-    # 3. Replace the fallback below with full Minimax or fork strategy:
-    return moves[0]
+# 4. Upgrade below with fork_box() or custom rules to become undefeated!
+play_random()
 `;
 
 const INITIAL_LOGS = [
-  { type: 'info', text: 'Telepath ready. Write your Python bot and press RUN ALGORITHM.' }
+  { type: 'info', text: 'Telepath ready. Write your rules (boxes 1-9) and press RUN ALGORITHM.' }
 ];
 
 export default function TicTacToeArena() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const uid = user?.id || 'guest';
-  const storageKey = (field) => `algo_ttt_py_${uid}_${field}`;
+  const storageKey = (field) => `algo_ttt_dsl1_${uid}_${field}`;
 
   const [code, setCode] = useState(() => localStorage.getItem(storageKey('code')) || STARTER_CODE);
   const [board, setBoard] = useState(() => {
@@ -443,7 +525,7 @@ export default function TicTacToeArena() {
 
     const timeoutMs = pyReady ? 10000 : 25000;
     const timer = setTimeout(() => {
-      addLog('error', 'Timeout (>10s) during live match. Check for infinite loops or optimize your search.');
+      addLog('error', 'Timeout (>10s) during live match. Check for infinite loops.');
       setStatusText('Bot timed out!');
       setGameOver(true);
       setBotThinking(false);
@@ -462,15 +544,15 @@ export default function TicTacToeArena() {
 
       if (e.data.mode === 'error') {
         addLog('error', e.data.message);
-        setStatusText('Bot crashed!');
+        setStatusText('Bot error!');
         setGameOver(true);
         return;
       }
 
       if (e.data.mode === 'single_move') {
         const idx = e.data.move;
-        if (!e.data.is_valid_int || idx < 0 || idx > 8 || currentBoard[idx] !== null) {
-          addLog('error', `Live match error: Bot returned illegal move (${idx}).`);
+        if (typeof idx !== 'number' || idx < 0 || idx > 8 || currentBoard[idx] !== null) {
+          addLog('error', `Live match error: Bot chose invalid box (${idx + 1}).`);
           setStatusText('Bot made an invalid move!');
           setGameOver(true);
           return;
@@ -497,7 +579,7 @@ export default function TicTacToeArena() {
     w.postMessage({
       mode: 'single_move',
       code,
-      helpers: PYTHON_HELPERS,
+      prelude: PYTHON_DSL_PRELUDE,
       board: currentBoard,
       botMark
     });
@@ -564,7 +646,7 @@ export default function TicTacToeArena() {
 
     const timeoutMs = pyReady ? 20000 : 35000;
     const timer = setTimeout(() => {
-      addLog('error', 'Verification timed out (>20s). Check for infinite loops or add Alpha-Beta pruning.');
+      addLog('error', 'Verification timed out (>20s). Check for infinite loops in your code.');
       setVerifying(false);
       initWorker();
     }, timeoutMs);
@@ -592,7 +674,7 @@ export default function TicTacToeArena() {
     w.postMessage({
       mode: 'verify',
       code,
-      helpers: PYTHON_HELPERS
+      prelude: PYTHON_DSL_PRELUDE
     });
   };
 
@@ -822,6 +904,11 @@ export default function TicTacToeArena() {
                       : 'bg-stone-950 hover:bg-stone-900 border-transparent hover:border-orange-500/30'
                   } ${cell === 'X' ? 'text-orange-500' : 'text-sky-400'}`}
                 >
+                  {cell === null && (
+                    <span className="absolute top-2 left-2.5 text-xs font-mono font-semibold text-stone-600 select-none">
+                      {idx + 1}
+                    </span>
+                  )}
                   {cell}
                   {isLastCell && (
                     <span className="absolute top-2 right-2 w-2 h-2 rounded-full bg-amber-400" />
